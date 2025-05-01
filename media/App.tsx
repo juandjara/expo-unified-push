@@ -4,6 +4,7 @@ import ExpoUnifiedPush, {
   requestPermissions,
   showLocalNotification,
 } from "expo-unified-push";
+import { subscribeDistributorMessages } from "expo-unified-push/ExpoUnifiedPushModule";
 import { useEffect, useState } from "react";
 import {
   Alert,
@@ -27,7 +28,7 @@ export default function App() {
   );
 
   useEffect(() => {
-    ExpoUnifiedPush.subscribeDistributorMessages(({ action, data }) => {
+    return subscribeDistributorMessages(({ action, data }) => {
       console.log("distributor message", action, data);
       setList(ExpoUnifiedPush.getDistributors());
       if (action === "registered") {
