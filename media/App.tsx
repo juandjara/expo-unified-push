@@ -124,7 +124,7 @@ export default function App() {
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView style={styles.container}>
-        <Text style={styles.header}>Expo Unified Push Example</Text>
+        <Text style={styles.header}>Expo UnifiedPush Example</Text>
         <Group name="Current Distributor">
           {currentDistributor ? (
             <>
