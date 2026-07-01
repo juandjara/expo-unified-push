@@ -133,7 +133,7 @@ class ExpoUnifiedPushModule : Module() {
           "android.permission.POST_NOTIFICATIONS"
         )
         if (permission == PackageManager.PERMISSION_GRANTED) {
-          distributorService!!.showNotification(json)
+          distributorService!!.showLocalNotification(json)
           promise.resolve()
         } else {
           promise.reject(CodedException("This application does not have permission to show notifications"))

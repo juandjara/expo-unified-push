@@ -4,7 +4,9 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -31,12 +33,44 @@ import org.unifiedpush.android.connector.PushService
 import org.unifiedpush.android.connector.data.PushEndpoint
 import org.unifiedpush.android.connector.data.PushMessage
 
+/**
+ * The config plugin `withPushPayloadRenderer` writes the classname of the app custom payload renderer (if any)
+ * to a `<meta-data>` block with this name in the AndroidManifest file.
+ * This is used to read the class from the classname via reflection in `ExpoUPService`.
+ */
+const val PAYLOAD_RENDERER_META_DATA = "dev.djara.expounifiedpush.PAYLOAD_RENDERER"
+
 class ExpoUPService : PushService() {
     val TAG = "ExpoUPService"
     private var _module: Module? = null
 
     fun setModule(m: Module) {
         _module = m
+    }
+
+    /** tracking lookup of custom renderer as a separate variable because payloadRenderer could actually be null (non-existant) */
+    private var payloadRendererResolved = false
+    private var payloadRenderer: PushPayloadRenderer? = null
+
+    /** Resolve the app-registered [PushPayloadRenderer], if any.
+     *  Caches the result (including the non-existant case) after the first lookup. */
+    private fun resolvePayloadRenderer(context: Context): PushPayloadRenderer? {
+        if (payloadRendererResolved) {
+            return payloadRenderer
+        }
+        payloadRendererResolved = true
+        payloadRenderer = kotlin.runCatching {
+            val appInfo = context.packageManager.getApplicationInfo(
+                context.packageName,
+                PackageManager.GET_META_DATA,
+            )
+            val className = appInfo.metaData?.getString(PAYLOAD_RENDERER_META_DATA)
+                ?: return@runCatching null
+            Class.forName(className).getDeclaredConstructor().newInstance() as? PushPayloadRenderer
+        }.onFailure { err ->
+            Log.e(TAG, "Error resolving custom PushPayloadRenderer: $err")
+        }.getOrNull()
+        return payloadRenderer
     }
 
     private fun sendPushEvent(action: String, data: Bundle) {
@@ -75,7 +109,16 @@ class ExpoUPService : PushService() {
 
         if (message.decrypted) {
             kotlin.runCatching {
-                showNotification(String(message.content))
+                val decrypted = String(message.content)
+                val renderer = resolvePayloadRenderer(applicationContext)
+                val content = if (renderer != null) {
+                    renderer.render(applicationContext, instance, decrypted)
+                } else {
+                    renderJsonPayload(decrypted)
+                }
+                if (content != null) {
+                    renderNotification(content)
+                }
             }.onFailure { err ->
                 Log.e(TAG, "Error displaying notification: $err")
                 sendErrorEvent(err)
@@ -83,65 +126,75 @@ class ExpoUPService : PushService() {
         }
     }
 
-    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
-    fun showNotification(message: String) {
+    /** The default payload renderer: expects a JSON string matching the fields in [NotificationContent] */
+    private fun renderJsonPayload(message: String): NotificationContent? {
         val data = kotlin.runCatching {
             val json = Json.parseToJsonElement(message)
             json.jsonObject
         }.onFailure { err ->
             Log.e(TAG, "Error parsing notification JSON object: $err")
             sendErrorEvent(err)
-        }.getOrNull()
-
-        // res is null is there was a failure in the `runCatching` block
-        if (data == null) {
-            return
-        }
+        }.getOrNull() ?: return null
 
         val id = data["id"]?.jsonPrimitive?.long
-        val url = data["url"]?.jsonPrimitive?.content
-        val title = data["title"]?.jsonPrimitive?.content
-        val body = data["body"]?.jsonPrimitive?.content
-        val imageUrl = data["imageUrl"]?.jsonPrimitive?.content
-        val count = data["number"]?.jsonPrimitive?.int
-        val silent = data["silent"]?.jsonPrimitive?.boolean
-        val type = data["type"]?.jsonPrimitive?.content
-
         if (id == null) {
             Log.w(TAG, "Not sending notification without 'id' in json body")
-            return
+            return null
         }
 
-        createNotificationChannel(type)
+        return NotificationContent(
+            id = id.toInt(),
+            title = data["title"]?.jsonPrimitive?.content,
+            body = data["body"]?.jsonPrimitive?.content,
+            imageUrl = data["imageUrl"]?.jsonPrimitive?.content,
+            number = data["number"]?.jsonPrimitive?.int,
+            silent = data["silent"]?.jsonPrimitive?.boolean,
+            type = data["type"]?.jsonPrimitive?.content,
+            url = data["url"]?.jsonPrimitive?.content,
+        )
+    }
 
-        val channel = getNotificationChannelId(type)
+    /** Entry point for the `showLocalNotification` in the JS side.
+     *  This skips renderer resolution and assumes
+     *  the caller will send `message` as a JSON string matching `NotificationContent` */
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    fun showLocalNotification(message: String) {
+        val content = renderJsonPayload(message) ?: return
+        renderNotification(content)
+    }
+
+    @RequiresPermission(Manifest.permission.POST_NOTIFICATIONS)
+    private fun renderNotification(content: NotificationContent) {
+        createNotificationChannel(content.type)
+
+        val channel = getNotificationChannelId(content.type)
         val notification =
             NotificationCompat.Builder(this, channel)
                 .setSmallIcon(android.R.drawable.sym_action_chat)
-                .setContentTitle(title)
-                .setContentText(body)
-                .setTicker(title)
+                .setContentTitle(content.title)
+                .setContentText(content.body)
+                .setTicker(content.title)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-                .setContentIntent(getOpenUrlIntent(url))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(content.body))
+                .setContentIntent(getOpenUrlIntent(content.url))
                 .setAutoCancel(true)
 
-        if (silent != null) {
-            notification.setSilent(silent)
+        if (content.silent != null) {
+            notification.setSilent(content.silent)
         }
 
-        if (count != null) {
-            notification.setNumber(count)
+        if (content.number != null) {
+            notification.setNumber(content.number)
         }
 
-        if (imageUrl !== null) {
+        if (content.imageUrl !== null) {
             runBlocking {
-                val bitmap = urlToBitmap(imageUrl)
+                val bitmap = urlToBitmap(content.imageUrl)
                 notification.setLargeIcon(bitmap)
             }
         }
 
-        NotificationManagerCompat.from(this).notify(id.toInt(), notification.build())
+        NotificationManagerCompat.from(this).notify(content.id, notification.build())
     }
 
     private suspend fun urlToBitmap(url: String): Bitmap {

@@ -145,9 +145,8 @@ export function checkPermissions() {
 /**
  * Show a local notification. This is a helper function that will show a notification using the native notification API.
  * It can be used to test the different types of notifications that can be received from the distributor.
- * The same payload that this function receives is the one that the backend will have to send to the distributor.
- *
- * @param notification The notification object with all its options.
+ * This skips renderer resolution and asks for the full notification object in the rendering shape.
+ * @param notification The notification complete notification object for rendering.
  */
 export async function showLocalNotification(notification: Notification) {
   try {
